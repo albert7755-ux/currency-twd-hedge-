@@ -30,6 +30,10 @@ with st.sidebar:
     exchange_rate = st.number_input("換匯匯率（台幣/美元）", min_value=25.0, max_value=40.0, value=32.0, step=0.1, format="%.2f")
     fund_amount = st.number_input("基金投資金額（台幣萬元）", min_value=10, max_value=1000, value=50, step=10)
 
+    usd_return = st.number_input("美元資產年化報酬率（%）", min_value=0.0, value=0.0, step=0.1, format="%.1f")
+    if usd_return > 0:
+        st.caption(f"✅ 美元資產有生息，損益平衡匯率會更低（保護力更強）")
+
     usd_in_usd = usd_amount / exchange_rate
     st.info(f"💵 美元資產：{usd_in_usd:.2f} 萬美元")
     st.info(f"📊 總資產：{usd_amount + fund_amount:.0f} 萬台幣")
@@ -57,7 +61,7 @@ if input_mode == "手動輸入":
         use_container_width=True,
         column_config={
             "基金名稱": st.column_config.TextColumn("基金名稱", width="large"),
-            **{p: st.column_config.NumberColumn(p, min_value=-20.0, max_value=50.0, format="%.1f%%") for p in PERIODS.keys()}
+            **{p: st.column_config.NumberColumn(p, min_value=-100.0, format="%.1f%%") for p in PERIODS.keys()}
         }
     )
     funds_df = edited_df
@@ -85,25 +89,32 @@ else:
         st.dataframe(funds_df, use_container_width=True)
 
 # ── 計算邏輯 ───────────────────────────────────────────────
-def calc_breakeven(fund_return_pct, period_years, fund_amount_twd, usd_amount_twd, usd_in_usd_val):
+def calc_breakeven(fund_return_pct, period_years, fund_amount_twd, usd_amount_twd, usd_in_usd_val, usd_return_pct=0.0):
     """
     fund_return_pct: 年化報酬率 %
     period_years: 年數
+    usd_return_pct: 美元資產年化報酬率 %
     回傳損益平衡匯率
     """
     r = fund_return_pct / 100
+    ru = usd_return_pct / 100
     fund_final = fund_amount_twd * ((1 + r) ** period_years)
     fund_profit = fund_final - fund_amount_twd
-    remaining_usd_cost = usd_amount_twd - fund_profit
-    if usd_in_usd_val <= 0:
+    # 美元資產期末本利和（台幣計價前，先用美元計算）
+    usd_final_usd = usd_in_usd_val * ((1 + ru) ** period_years)
+    # 損益平衡：美元換回台幣 + 基金獲利 = 原始美元台幣成本
+    # usd_final_usd * breakeven_rate + fund_profit = usd_amount_twd
+    remaining = usd_amount_twd - fund_profit
+    if usd_final_usd <= 0:
         return None
-    breakeven_rate = remaining_usd_cost / usd_in_usd_val
+    breakeven_rate = remaining / usd_final_usd
     appreciation_pct = (exchange_rate - breakeven_rate) / exchange_rate * 100
     return {
         "損益平衡匯率": round(breakeven_rate, 2),
         "可承受升值幅度(%)": round(appreciation_pct, 2),
         "基金累積獲利(萬)": round(fund_profit, 1),
         "基金期末總值(萬)": round(fund_final, 1),
+        "美元資產期末(萬美元)": round(usd_final_usd, 2),
     }
 
 # ── 主要輸出 ───────────────────────────────────────────────
@@ -127,7 +138,7 @@ if funds_df is not None and len(funds_df) > 0:
                 fund_row[f"{period_label}_可承受升值(%)"] = None
                 chart_data[fund_name].append((period_label, None))
             else:
-                res = calc_breakeven(float(val), period_years, fund_amount, usd_amount, usd_in_usd)
+                res = calc_breakeven(float(val), period_years, fund_amount, usd_amount, usd_in_usd, usd_return)
                 fund_row[f"{period_label}_損益平衡匯率"] = res["損益平衡匯率"]
                 fund_row[f"{period_label}_可承受升值(%)"] = res["可承受升值幅度(%)"]
                 chart_data[fund_name].append((period_label, res["損益平衡匯率"]))
@@ -157,7 +168,7 @@ if funds_df is not None and len(funds_df) > 0:
                     r2[period_label] = "-"
                     r3[period_label] = "-"
                 else:
-                    res = calc_breakeven(float(val), PERIODS[period_label], fund_amount, usd_amount, usd_in_usd)
+                    res = calc_breakeven(float(val), PERIODS[period_label], fund_amount, usd_amount, usd_in_usd, usd_return)
                     r1[period_label] = f"{float(val):.1f}%"
                     r2[period_label] = f"{res['損益平衡匯率']:.2f}"
                     r3[period_label] = f"{res['可承受升值幅度(%)']:.1f}%"
@@ -278,7 +289,7 @@ if funds_df is not None and len(funds_df) > 0:
                             cell.value = "-"
                             cell.font = Font(color="4B5563", name="Arial")
                         else:
-                            res = calc_breakeven(float(val), PERIODS[period_label], fund_amount, usd_amount, usd_in_usd)
+                            res = calc_breakeven(float(val), PERIODS[period_label], fund_amount, usd_amount, usd_in_usd, usd_return)
                             if metric_key == "return":
                                 cell.value = float(val) / 100
                                 cell.number_format = "0.0%"
