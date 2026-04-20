@@ -47,12 +47,11 @@ funds_df = None
 
 if input_mode == "手動輸入":
     st.subheader("✏️ 手動輸入基金資料")
-    st.caption("請輸入各期間的年化報酬率（%），留空代表無資料")
+    st.caption("請輸入各期間的年化報酬率（%）｜計算方式：累加（年化報酬率 × 年數），留空代表無資料")
 
     default_funds = [
-        {"基金名稱": "PIMCO Income Fund", "半年": 4.2, "1年": 6.8, "2年": 5.1, "3年": 4.5, "5年": 5.3, "7年": 5.8, "10年": 6.2},
-        {"基金名稱": "BlackRock Global Allocation", "半年": 5.1, "1年": 8.2, "2年": 6.3, "3年": 5.9, "5年": 7.1, "7年": 7.5, "10年": 8.0},
-        {"基金名稱": "Fidelity Global Quality Bond", "半年": 3.8, "1年": 5.9, "2年": 4.7, "3年": 4.2, "5年": 4.9, "7年": 5.2, "10年": 5.6},
+        {"基金名稱": "安聯台灣科技 (ACDD04)", "半年": None, "1年": None, "2年": None, "3年": None, "5年": None, "7年": None, "10年": None},
+        {"基金名稱": "元大全球優質龍頭平衡 (ACYT168)", "半年": None, "1年": None, "2年": None, "3年": None, "5年": None, "7年": None, "10年": None},
     ]
 
     edited_df = st.data_editor(
@@ -91,22 +90,23 @@ else:
 # ── 計算邏輯 ───────────────────────────────────────────────
 def calc_breakeven(fund_return_pct, period_years, fund_amount_twd, usd_amount_twd, usd_in_usd_val, usd_return_pct=0.0):
     """
-    fund_return_pct: 年化報酬率 %
+    fund_return_pct: 年化報酬率 % （期間累積報酬，非年化）
     period_years: 年數
-    usd_return_pct: 美元資產年化報酬率 %
-    回傳損益平衡匯率
+    usd_return_pct: 美元資產年化累積報酬率 %
+    計算方式：累加（線性），非複利
     """
-    r = fund_return_pct / 100
-    ru = usd_return_pct / 100
-    fund_final = fund_amount_twd * ((1 + r) ** period_years)
-    fund_profit = fund_final - fund_amount_twd
-    # 美元資產期末本利和（台幣計價前，先用美元計算）
-    usd_final_usd = usd_in_usd_val * ((1 + ru) ** period_years)
-    # 損益平衡：美元換回台幣 + 基金獲利 = 原始美元台幣成本
-    # usd_final_usd * breakeven_rate + fund_profit = usd_amount_twd
+    # 基金：累積獲利 = 本金 × 年化報酬率 × 年數
+    fund_profit = fund_amount_twd * (fund_return_pct / 100) * period_years
+    fund_final = fund_amount_twd + fund_profit
+    # 美元資產：累積獲利也是線性
+    usd_profit_twd = usd_amount_twd * (usd_return_pct / 100) * period_years
+    usd_total_twd = usd_amount_twd + usd_profit_twd
+    # 損益平衡匯率：(美元本利和台幣 - 基金獲利) / 美元數量
     remaining = usd_amount_twd - fund_profit
-    if usd_final_usd <= 0:
+    if usd_in_usd_val <= 0:
         return None
+    # 美元資產期末美元數（累積線性，僅用於換算匯率）
+    usd_final_usd = usd_in_usd_val * (1 + (usd_return_pct / 100) * period_years)
     breakeven_rate = remaining / usd_final_usd
     appreciation_pct = (exchange_rate - breakeven_rate) / exchange_rate * 100
     return {
