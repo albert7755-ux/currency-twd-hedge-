@@ -6,6 +6,128 @@ from io import BytesIO
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+import json
+import requests
+from datetime import datetime, timedelta
+
+# ── Google Drive 設定 ──────────────────────────────────────
+FUND_FOLDER_ID = "1i1-zUzLNnuwo2NVWijubvBICLbladZQO"
+
+FUND_DB = {
+    "F0HKG05X22_FO": "安聯台灣科技 (ACDD04)",
+    "F00001EBH4_FO": "元大全球優質龍頭平衡 (ACYT168)",
+    "F00001DRQQ_FO": "PIMCO收益增長",
+    "F0GBR04SG1_FO": "駿利亨德森平衡基金",
+    "F00000ZXFV_FO": "施羅德環球收息債券",
+    "F00000PR1I_FO": "富達全球優質債券基金",
+    "F000011JGT_FO": "群益潛力收益多重",
+    "F0GBR04MRL_FO": "聯博美國收益EA穩定月配",
+    "FOGBR05KHT_FO": "PIMCO多元收益",
+    "F0GBR04AMK_FO": "貝萊德環球資產配置基金",
+    "F00000MLER_FO": "聯博新興市場多元收益",
+    "F00000T0K2_FO": "聯博美國成長基金EP",
+    "F00000V557_FO": "聯博全球多元",
+    "F00001EQPP_FO": "富邦台美雙星多重",
+}
+
+@st.cache_resource
+def get_gspread_client():
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets.readonly",
+            "https://www.googleapis.com/auth/drive.readonly"
+        ]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        return gspread.authorize(creds)
+    except Exception as e:
+        return None
+
+def get_drive_headers():
+    from google.oauth2.service_account import Credentials
+    from google.auth.transport.requests import Request
+    creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
+    scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    creds.refresh(Request())
+    return {"Authorization": f"Bearer {creds.token}"}
+
+@st.cache_data(ttl=3600)
+def list_sheets_in_folder(folder_id):
+    try:
+        headers = get_drive_headers()
+        params = {
+            "q": f"'{folder_id}' in parents and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",
+            "fields": "files(id, name)",
+            "pageSize": 200,
+        }
+        resp = requests.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
+        return {f["name"]: f["id"] for f in resp.json().get("files", [])}
+    except:
+        return {}
+
+@st.cache_data(ttl=3600)
+def read_nav_series(sheet_id, label):
+    try:
+        client = get_gspread_client()
+        sh = client.open_by_key(sheet_id)
+        ws = sh.get_worksheet(0)
+        data = ws.get_all_records()
+        df = pd.DataFrame(data)
+        date_col = df.columns[0]
+        val_col = df.columns[1]
+        try:
+            df["date"] = pd.to_datetime(df[date_col], unit="s", errors="coerce")
+            if df["date"].isna().mean() > 0.5:
+                df["date"] = pd.to_datetime(df[date_col], errors="coerce")
+        except:
+            df["date"] = pd.to_datetime(df[date_col], errors="coerce")
+        df = df.dropna(subset=["date"])
+        df = df.sort_values("date").set_index("date")
+        return df[val_col].astype(float).rename(label)
+    except Exception as e:
+        return None
+
+def calc_period_return(nav_series, period_years):
+    """從淨值序列計算特定期間的累積報酬率%"""
+    end = nav_series.index[-1]
+    days = int(period_years * 365)
+    start = end - timedelta(days=days)
+    subset = nav_series[nav_series.index >= start]
+    if len(subset) < 5:
+        return None
+    ret = (subset.iloc[-1] / subset.iloc[0] - 1) * 100
+    # 換算成年化（線性）
+    actual_years = (subset.index[-1] - subset.index[0]).days / 365
+    if actual_years <= 0:
+        return None
+    annual_ret = ret / actual_years
+    return round(annual_ret, 2)
+
+def fetch_fund_returns_from_drive(selected_tickers):
+    """從 Google Drive 抓基金淨值並計算各期間年化報酬率"""
+    fund_sheets = list_sheets_in_folder(FUND_FOLDER_ID)
+    rows = []
+    progress = st.progress(0, text="讀取基金資料中...")
+    for i, ticker in enumerate(selected_tickers):
+        fund_name = FUND_DB.get(ticker, ticker)
+        sheet_id = fund_sheets.get(ticker)
+        if not sheet_id:
+            st.warning(f"⚠️ 找不到 {fund_name} 的試算表，跳過")
+            continue
+        nav = read_nav_series(sheet_id, fund_name)
+        if nav is None or len(nav) < 10:
+            st.warning(f"⚠️ {fund_name} 資料不足，跳過")
+            continue
+        row = {"基金名稱": fund_name}
+        for period_label, period_years in PERIODS.items():
+            row[period_label] = calc_period_return(nav, period_years)
+        rows.append(row)
+        progress.progress((i+1)/len(selected_tickers), text=f"已讀取：{fund_name}")
+    progress.empty()
+    return pd.DataFrame(rows) if rows else None
 
 st.set_page_config(page_title="匯率避險分析工具", page_icon="💱", layout="wide")
 
@@ -40,12 +162,37 @@ with st.sidebar:
 
     st.divider()
     st.subheader("📋 基金清單輸入")
-    input_mode = st.radio("輸入方式", ["手動輸入", "上傳CSV/Excel"])
+    input_mode = st.radio("輸入方式", ["Google Drive 自動抓", "手動輸入", "上傳CSV/Excel"])
 
 # ── 基金資料輸入 ───────────────────────────────────────────
 funds_df = None
 
-if input_mode == "手動輸入":
+if input_mode == "Google Drive 自動抓":
+    st.subheader("☁️ 從 Google Drive 自動讀取基金淨值")
+    st.caption("系統會自動從 Drive 抓取淨值並計算各期間年化報酬率（累加法）")
+
+    selected_tickers = st.multiselect(
+        "選擇基金（可多選）",
+        options=list(FUND_DB.keys()),
+        default=["F0HKG05X22_FO", "F00001EBH4_FO"],
+        format_func=lambda x: FUND_DB[x]
+    )
+
+    if selected_tickers:
+        if st.button("🔄 從 Google Drive 讀取資料", type="primary"):
+            try:
+                funds_df = fetch_fund_returns_from_drive(selected_tickers)
+                if funds_df is not None:
+                    st.session_state["drive_funds_df"] = funds_df
+                    st.success(f"✅ 成功讀取 {len(funds_df)} 檔基金")
+            except Exception as e:
+                st.error(f"讀取失敗：{e}｜請確認 GOOGLE_CREDENTIALS 已設定在 Streamlit Secrets")
+
+    if "drive_funds_df" in st.session_state:
+        funds_df = st.session_state["drive_funds_df"]
+        st.dataframe(funds_df, use_container_width=True)
+
+elif input_mode == "手動輸入":
     st.subheader("✏️ 手動輸入基金資料")
     st.caption("請輸入各期間的年化報酬率（%）｜計算方式：累加（年化報酬率 × 年數），留空代表無資料")
 
@@ -69,7 +216,6 @@ else:
     st.subheader("📁 上傳基金資料")
     st.caption("檔案需包含欄位：基金名稱、半年、1年、2年、3年、5年、7年、10年（年化報酬率%）")
 
-    # 下載範本
     template_df = pd.DataFrame([
         {"基金名稱": "範例基金A", "半年": 4.2, "1年": 6.8, "2年": 5.1, "3年": 4.5, "5年": 5.3, "7年": 5.8, "10年": 6.2},
         {"基金名稱": "範例基金B", "半年": "", "1年": 8.2, "2年": 6.3, "3年": 5.9, "5年": 7.1, "7年": 7.5, "10年": 8.0},
