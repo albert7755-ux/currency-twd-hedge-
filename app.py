@@ -102,26 +102,52 @@ def calc_period_return(nav_series, period_years):
     return round(ret, 2)
 
 def fetch_fund_returns_from_drive(selected_tickers):
-    """從 Google Drive 抓基金淨值並計算各期間年化報酬率"""
+    """從 Google Drive 抓基金淨值並計算各期間累積報酬率"""
     fund_sheets = list_sheets_in_folder(FUND_FOLDER_ID)
     rows = []
+    debug_info = []
     progress = st.progress(0, text="讀取基金資料中...")
     for i, ticker in enumerate(selected_tickers):
         fund_name = FUND_DB.get(ticker, ticker)
         sheet_id = fund_sheets.get(ticker)
         if not sheet_id:
-            st.warning(f"⚠️ 找不到 {fund_name} 的試算表，跳過")
+            st.warning(f"⚠️ 找不到 {fund_name} 的試算表（ticker={ticker}），跳過")
             continue
         nav = read_nav_series(sheet_id, fund_name)
         if nav is None or len(nav) < 10:
             st.warning(f"⚠️ {fund_name} 資料不足，跳過")
             continue
+
         row = {"基金名稱": fund_name}
+        fund_debug = {
+            "基金": fund_name,
+            "資料起始": nav.index[0].strftime("%Y-%m-%d"),
+            "資料結束": nav.index[-1].strftime("%Y-%m-%d"),
+            "起始淨值": round(float(nav.iloc[0]), 4),
+            "結束淨值": round(float(nav.iloc[-1]), 4),
+            "資料筆數": len(nav),
+        }
         for period_label, period_years in PERIODS.items():
-            row[period_label] = calc_period_return(nav, period_years)
+            ret = calc_period_return(nav, period_years)
+            row[period_label] = ret
+            # debug: 記錄每個期間的起訖淨值
+            end_dt = nav.index[-1]
+            start_dt = end_dt - timedelta(days=int(period_years * 365))
+            subset = nav[nav.index >= start_dt]
+            if len(subset) >= 5:
+                fund_debug[f"{period_label}_起始"] = subset.index[0].strftime("%Y-%m-%d")
+                fund_debug[f"{period_label}_起始淨值"] = round(float(subset.iloc[0]), 4)
+                fund_debug[f"{period_label}_累積%"] = ret
         rows.append(row)
+        debug_info.append(fund_debug)
         progress.progress((i+1)/len(selected_tickers), text=f"已讀取：{fund_name}")
     progress.empty()
+
+    # 顯示 debug 資訊（可展開）
+    if debug_info:
+        with st.expander("🔍 資料驗證（點擊展開確認起訖日期與淨值）"):
+            st.dataframe(pd.DataFrame(debug_info), use_container_width=True, hide_index=True)
+
     return pd.DataFrame(rows) if rows else None
 
 st.set_page_config(page_title="匯率避險分析工具", page_icon="💱", layout="wide")
