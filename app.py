@@ -234,27 +234,33 @@ else:
         st.dataframe(funds_df, use_container_width=True)
 
 # ── 計算邏輯 ───────────────────────────────────────────────
-def calc_breakeven(fund_return_pct, period_years, fund_amount_twd, usd_amount_twd, usd_in_usd_val, usd_return_pct=0.0):
+def calc_breakeven(fund_annual_pct, period_years, fund_amount_twd, usd_amount_twd, usd_in_usd_val, usd_return_pct=0.0):
     """
-    fund_return_pct: 年化報酬率 % （期間累積報酬，非年化）
-    period_years: 年數
-    usd_return_pct: 美元資產年化累積報酬率 %
-    計算方式：累加（線性），非複利
+    fund_annual_pct : 年化報酬率%（使用者輸入或 Drive 抓到的都是年化）
+    period_years    : 年數
+    usd_return_pct  : 美元資產年化報酬率%
+
+    邏輯：
+    - 基金累積獲利 = 本金 × 年化報酬率 × 年數（累加，非複利）
+    - 美元累積獲利 = 美元台幣成本 × 年化報酬率 × 年數
+    - 損益平衡匯率 = (美元台幣成本 - 基金累積獲利) / 美元數量期末
     """
-    # 基金：累積獲利 = 本金 × 年化報酬率 × 年數
-    fund_profit = fund_amount_twd * (fund_return_pct / 100) * period_years
-    fund_final = fund_amount_twd + fund_profit
-    # 美元資產：累積獲利也是線性
-    usd_profit_twd = usd_amount_twd * (usd_return_pct / 100) * period_years
-    usd_total_twd = usd_amount_twd + usd_profit_twd
-    # 損益平衡匯率：(美元本利和台幣 - 基金獲利) / 美元數量
-    remaining = usd_amount_twd - fund_profit
-    if usd_in_usd_val <= 0:
-        return None
-    # 美元資產期末美元數（累積線性，僅用於換算匯率）
+    # 基金累積獲利（年化 × 年數 = 總累積，線性）
+    fund_profit = fund_amount_twd * (fund_annual_pct / 100) * period_years
+    fund_final  = fund_amount_twd + fund_profit
+
+    # 美元資產期末美元數（含美元本身生息，線性）
     usd_final_usd = usd_in_usd_val * (1 + (usd_return_pct / 100) * period_years)
+
+    if usd_final_usd <= 0:
+        return None
+
+    # 損益平衡匯率：用基金獲利補貼美元匯損後，剛好不賠的匯率
+    # usd_final_usd × breakeven = usd_amount_twd - fund_profit
+    remaining = usd_amount_twd - fund_profit
     breakeven_rate = remaining / usd_final_usd
     appreciation_pct = (exchange_rate - breakeven_rate) / exchange_rate * 100
+
     return {
         "損益平衡匯率": round(breakeven_rate, 2),
         "可承受升值幅度(%)": round(appreciation_pct, 2),
@@ -299,7 +305,7 @@ if funds_df is not None and len(funds_df) > 0:
     with tab1:
         # 損益平衡匯率表
         st.markdown("#### 損益平衡匯率（台幣/美元）")
-        st.caption(f"換匯匯率：{exchange_rate} ｜ 美元資產：{usd_amount}萬 ｜ 基金投資：{fund_amount}萬")
+        st.caption(f"換匯匯率：{exchange_rate} ｜ 美元資產：{usd_amount}萬（年化報酬 {usd_return}%）｜ 基金投資：{fund_amount}萬")
 
         display_rows = []
         for _, row in funds_df.iterrows():
@@ -333,16 +339,38 @@ if funds_df is not None and len(funds_df) > 0:
         colors = ["#c9a84c", "#3b82f6", "#22c55e", "#ef4444", "#a855f7", "#f97316", "#06b6d4"]
 
         for i, (fund_name, data_points) in enumerate(chart_data.items()):
+            # 實際線（含美元報酬率設定）
             xs = [p for p, v in data_points if v is not None]
             ys = [v for _, v in data_points if v is not None]
             if xs:
                 fig.add_trace(go.Scatter(
                     x=xs, y=ys, mode="lines+markers",
-                    name=fund_name,
+                    name=f"{fund_name}（美元{usd_return}%）",
                     line=dict(color=colors[i % len(colors)], width=2.5),
                     marker=dict(size=8),
-                    hovertemplate=f"<b>{fund_name}</b><br>%{{x}}: 損益平衡匯率 %{{y:.2f}} 元<extra></extra>"
+                    hovertemplate=f"<b>{fund_name}</b>（美元{usd_return}%）<br>%{{x}}: %{{y:.2f}} 元<extra></extra>"
                 ))
+
+            # 對比線：美元資產0%（虛線）
+            if usd_return > 0:
+                row_data = funds_df[funds_df["基金名稱"] == fund_name]
+                if not row_data.empty:
+                    xs0, ys0 = [], []
+                    for period_label, period_years in PERIODS.items():
+                        val = row_data.iloc[0].get(period_label)
+                        if not (pd.isna(val) or val == "" or val is None):
+                            res0 = calc_breakeven(float(val), period_years, fund_amount, usd_amount, usd_in_usd, 0.0)
+                            xs0.append(period_label)
+                            ys0.append(res0["損益平衡匯率"])
+                    if xs0:
+                        fig.add_trace(go.Scatter(
+                            x=xs0, y=ys0, mode="lines+markers",
+                            name=f"{fund_name}（美元0%）",
+                            line=dict(color=colors[i % len(colors)], width=1.5, dash="dot"),
+                            marker=dict(size=6, symbol="circle-open"),
+                            opacity=0.6,
+                            hovertemplate=f"<b>{fund_name}</b>（美元0%）<br>%{{x}}: %{{y:.2f}} 元<extra></extra>"
+                        ))
 
         # 參考線
         fig.add_hline(y=exchange_rate, line_dash="dot", line_color="#22c55e", annotation_text=f"起始匯率 {exchange_rate}", annotation_position="top left")
@@ -361,7 +389,10 @@ if funds_df is not None and len(funds_df) > 0:
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        st.caption("損益平衡匯率越低，代表基金獲利越多、能抵銷更大幅度的台幣升值。低於28元進入警戒區。")
+        if usd_return > 0:
+            st.caption(f"實線 = 美元資產有 {usd_return}% 報酬；虛線 = 美元資產0%（對比）。實線越低於虛線，代表美元生息效果越顯著。")
+        else:
+            st.caption("損益平衡匯率越低，代表基金獲利越多、能抵銷更大幅度的台幣升值。低於28元進入警戒區。設定美元資產報酬率可顯示對比虛線。")
 
     with tab3:
         st.markdown("#### 下載Excel分析報告")
