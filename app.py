@@ -91,13 +91,21 @@ def read_nav_series(sheet_id, label):
         return None
 
 def calc_period_return(nav_series, period_years):
-    """從淨值序列計算特定期間的累積總報酬%（不年化）"""
+    """從淨值序列計算特定期間的累積總報酬%（不年化）
+    若資料起始日晚於所需期間起始日超過30天，回傳 None（顯示 -）
+    """
     end = nav_series.index[-1]
-    days = int(period_years * 365)
-    start = end - timedelta(days=days)
-    subset = nav_series[nav_series.index >= start]
+    required_start = end - timedelta(days=int(period_years * 365))
+    actual_start = nav_series.index[0]
+
+    # 資料起始比需要的期間晚超過30天 → 資料不足，回傳 None
+    if actual_start > required_start + timedelta(days=30):
+        return None
+
+    subset = nav_series[nav_series.index >= required_start]
     if len(subset) < 5:
         return None
+
     ret = (subset.iloc[-1] / subset.iloc[0] - 1) * 100
     return round(ret, 2)
 
