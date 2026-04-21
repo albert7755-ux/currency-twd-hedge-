@@ -91,7 +91,7 @@ def read_nav_series(sheet_id, label):
         return None
 
 def calc_period_return(nav_series, period_years):
-    """從淨值序列計算特定期間的累積報酬率%"""
+    """從淨值序列計算特定期間的累積總報酬%（不年化）"""
     end = nav_series.index[-1]
     days = int(period_years * 365)
     start = end - timedelta(days=days)
@@ -99,12 +99,7 @@ def calc_period_return(nav_series, period_years):
     if len(subset) < 5:
         return None
     ret = (subset.iloc[-1] / subset.iloc[0] - 1) * 100
-    # 換算成年化（線性）
-    actual_years = (subset.index[-1] - subset.index[0]).days / 365
-    if actual_years <= 0:
-        return None
-    annual_ret = ret / actual_years
-    return round(annual_ret, 2)
+    return round(ret, 2)
 
 def fetch_fund_returns_from_drive(selected_tickers):
     """從 Google Drive 抓基金淨值並計算各期間年化報酬率"""
@@ -194,7 +189,7 @@ if input_mode == "Google Drive 自動抓":
 
 elif input_mode == "手動輸入":
     st.subheader("✏️ 手動輸入基金資料")
-    st.caption("請輸入各期間的年化報酬率（%）｜計算方式：累加（年化報酬率 × 年數），留空代表無資料")
+    st.caption("請輸入各期間的年化報酬率（%）｜請輸入各期間的累積總報酬率（%），留空代表無資料")
 
     default_funds = [
         {"基金名稱": "安聯台灣科技 (ACDD04)", "半年": None, "1年": None, "2年": None, "3年": None, "5年": None, "7年": None, "10年": None},
@@ -234,29 +229,27 @@ else:
         st.dataframe(funds_df, use_container_width=True)
 
 # ── 計算邏輯 ───────────────────────────────────────────────
-def calc_breakeven(fund_annual_pct, period_years, fund_amount_twd, usd_amount_twd, usd_in_usd_val, usd_return_pct=0.0):
+def calc_breakeven(fund_cumulative_pct, period_years, fund_amount_twd, usd_amount_twd, usd_in_usd_val, usd_return_pct=0.0):
     """
-    fund_annual_pct : 年化報酬率%（使用者輸入或 Drive 抓到的都是年化）
-    period_years    : 年數
-    usd_return_pct  : 美元資產年化報酬率%
+    fund_cumulative_pct : 該期間累積總報酬%（例如2年漲了60%就填60）
+    period_years        : 年數（只用於計算美元資產累積生息）
+    usd_return_pct      : 美元資產年化報酬率%（線性累加）
 
     邏輯：
-    - 基金累積獲利 = 本金 × 年化報酬率 × 年數（累加，非複利）
-    - 美元累積獲利 = 美元台幣成本 × 年化報酬率 × 年數
-    - 損益平衡匯率 = (美元台幣成本 - 基金累積獲利) / 美元數量期末
+    - 基金累積獲利 = 本金 × 累積總報酬%（直接用，不乘年數）
+    - 美元累積生息 = 美元數量 × 年化報酬率 × 年數（線性）
+    - 損益平衡匯率 = (美元台幣成本 - 基金累積獲利) / 美元期末數量
     """
-    # 基金累積獲利（年化 × 年數 = 總累積，線性）
-    fund_profit = fund_amount_twd * (fund_annual_pct / 100) * period_years
+    # 基金累積獲利（直接用累積%，不乘年數）
+    fund_profit = fund_amount_twd * (fund_cumulative_pct / 100)
     fund_final  = fund_amount_twd + fund_profit
 
-    # 美元資產期末美元數（含美元本身生息，線性）
+    # 美元資產期末美元數（年化報酬線性累加）
     usd_final_usd = usd_in_usd_val * (1 + (usd_return_pct / 100) * period_years)
 
     if usd_final_usd <= 0:
         return None
 
-    # 損益平衡匯率：用基金獲利補貼美元匯損後，剛好不賠的匯率
-    # usd_final_usd × breakeven = usd_amount_twd - fund_profit
     remaining = usd_amount_twd - fund_profit
     breakeven_rate = remaining / usd_final_usd
     appreciation_pct = (exchange_rate - breakeven_rate) / exchange_rate * 100
@@ -310,7 +303,7 @@ if funds_df is not None and len(funds_df) > 0:
         display_rows = []
         for _, row in funds_df.iterrows():
             fund_name = row.get("基金名稱", "未命名")
-            r1 = {"基金名稱": fund_name, "指標": "年化報酬率(%)"}
+            r1 = {"基金名稱": fund_name, "指標": "累積報酬率(%)"}
             r2 = {"基金名稱": "", "指標": "損益平衡匯率"}
             r3 = {"基金名稱": "", "指標": "可承受升值幅度(%)"}
             for period_label in PERIODS.keys():
